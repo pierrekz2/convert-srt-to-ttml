@@ -1,14 +1,26 @@
 import os
 from pathlib import Path
 from datetime import datetime
+import chardet
+import unicodedata
+import re
 
+def detectar_codificacao_arquivo(nome_arquivo):
+    with open(nome_arquivo, 'rb') as arquivo:
+        dados = arquivo.read()
+        resultado = chardet.detect(dados)
+        codificacao = resultado['encoding']
+        print("codificação:", codificacao)
+        return codificacao
 
 def convert_srt_to_ttml(srt_file, ttml_file, language, log_file):
     try:
-        with open(srt_file, 'r', encoding='utf-8') as srt:
+        codificacao = detectar_codificacao_arquivo(srt_file)
+        with open(srt_file, 'r', encoding=codificacao) as srt:
             lines = srt.readlines()
 
         ttml_content = convert_to_ttml(lines, language)
+        print("Lendo:", srt_file)
 
         with open(ttml_file, 'w', encoding='utf-8') as ttml:
             ttml.write(ttml_content)
@@ -16,21 +28,40 @@ def convert_srt_to_ttml(srt_file, ttml_file, language, log_file):
         os.chmod(ttml_file, 0o775)
         print("Arquivo TTML convertido gerado:", ttml_file)
 
-    except UnicodeDecodeError:
+    except UnicodeDecodeError as e:
         with open(log_file, 'a') as log:
-            log.write(srt_file + '\n')
+            log.write(f"Erro ao converter o arquivo: {srt_file}\n")
         print("Erro ao converter o arquivo:", srt_file)
+        print("Detalhes do erro:", str(e))
+
+def fix_accentuation(line):
+    return ''.join(c for c in unicodedata.normalize('NFD', line) if unicodedata.category(c) != 'Mn')
 
 def convert_to_ttml(lines, language):
     def convert_time_format(time_str):
         time_parts = time_str.replace(',', '.').split(' --> ')
-        start_time = datetime.strptime(time_parts[0], '%H:%M:%S.%f')
-        end_time = datetime.strptime(time_parts[1], '%H:%M:%S.%f')
 
-        start_seconds = (start_time.hour * 3600) + (start_time.minute * 60) + start_time.second + (start_time.microsecond / 1000000)
-        end_seconds = (end_time.hour * 3600) + (end_time.minute * 60) + end_time.second + (end_time.microsecond / 1000000)
+        if len(time_parts) != 2:
+            return None, None
 
-        return '{:.3f}'.format(start_seconds), '{:.3f}'.format(end_seconds)
+        start_time_str, end_time_str = time_parts
+        try:
+            if start_time_str.startswith('-'):
+                start_time = datetime.strptime(start_time_str[1:], '-%H:%M:%S.%f')
+                end_time = datetime.strptime(end_time_str, '-%H:%M:%S.%f')
+
+                start_seconds = -((start_time.hour * 3600) + (start_time.minute * 60) + start_time.second + (start_time.microsecond / 1000000))
+                end_seconds = -((end_time.hour * 3600) + (end_time.minute * 60) + end_time.second + (end_time.microsecond / 1000000))
+            else:
+                start_time = datetime.strptime(start_time_str, '%H:%M:%S.%f')
+                end_time = datetime.strptime(end_time_str, '%H:%M:%S.%f')
+
+                start_seconds = (start_time.hour * 3600) + (start_time.minute * 60) + start_time.second + (start_time.microsecond / 1000000)
+                end_seconds = (end_time.hour * 3600) + (end_time.minute * 60) + end_time.second + (end_time.microsecond / 1000000)
+
+            return '{:.3f}'.format(start_seconds), '{:.3f}'.format(end_seconds)
+        except ValueError:
+            return None, None
 
     ttml_content = '''<?xml version="1.0" encoding="utf-8"?>
 <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" ttp:timeBase="media" xmlns:tts="http://www.w3.org/ns/ttml#styling" xml:lang="{}" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
@@ -58,7 +89,6 @@ def convert_to_ttml(lines, language):
 
     is_subtitle = False
     subtitle_counter = 0
-
     for line in lines:
         line = line.strip()
 
@@ -74,7 +104,11 @@ def convert_to_ttml(lines, language):
             ttml_content += f'      <p begin="{start}s" xml:id="p{subtitle_counter}" end="{end}s">'
             is_subtitle = True
         else:
-            if is_subtitle:
+            line = line.replace('{\\an8}', '')
+            line = line.replace('<i><font face="proportionalSansSerif" color="rgba(255,255,255,255)">', '')
+            line = re.sub(r'<[^>]*>', '', line)
+            line = line.strip()
+            if line and is_subtitle:
                 ttml_content += f'{line}<br />'
 
     ttml_content += '''    </div>
@@ -93,8 +127,9 @@ def check_srt_files(root_directory, language, log_file):
                 ttml_file = os.path.splitext(srt_file)[0] + '.ttml'
                 convert_srt_to_ttml(srt_file, ttml_file, language, log_file)
 
-root_directory = ""
+root_directory = "/"
 language = "pt"
-log_file = ""
+log_file = "/"
 
 check_srt_files(root_directory, language, log_file)
+
